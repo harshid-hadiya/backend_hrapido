@@ -1,0 +1,285 @@
+const axios = require('axios');
+const geohash = require('ngeohash');
+const User = require("../model/userModel.js");
+const Ride = require("../model/rideModel.js");
+const bcrypt = require("bcrypt");
+const asyncHandler = require("express-async-handler");
+const getJsonToken = require("../config/getJsonToken.js");
+// 1. CREATE USER (Customer)
+const createUser = asyncHandler(async (req, res) => {
+  const { name, email, username, password, Mobile } = req.body;
+
+  if (!name || !email || !password || !username || !Mobile) {
+    res.status(400);
+    throw new Error("Please fill all data fields");
+  }
+
+  const userExists = await User.findOne({ $or: [{ username }, { email }] });
+
+  if (userExists) {
+    // If user exists, check password to allow "auto-login" or throw error
+    const isMatch = await bcrypt.compare(password, userExists.password);
+    if (!isMatch) {
+      res.status(400);
+      throw new Error(
+        "Username/Email already taken. If it's yours, enter correct password."
+      );
+    }
+    // If password matches existing user, just return them (Auto-Login)
+    return res.status(200).json({
+      user_name: userExists.username,
+      Mobile: userExists.Mobile,
+      jsonToken: getJsonToken(userExists.email, userExists._id),
+    });
+  }
+
+  // Create new user
+  const hashPassword = await bcrypt.hash(password, 10);
+  const newUser = await User.create({
+    name,
+    email,
+    username,
+    Mobile,
+    password: hashPassword,
+  });
+
+  res.status(201).json({
+    user_name: newUser.username,
+    Mobile: newUser.Mobile,
+    jsonToken: getJsonToken(newUser.email, newUser._id),
+  });
+});
+
+// 2. CREATE/UPGRADE RIDER
+const createRider = asyncHandler(async (req, res) => {
+  const { name, email, username, password, Mobile, rideType } = req.body;
+
+  if (!name || !email || !password || !username || !Mobile || !rideType) {
+    res.status(400);
+    throw new Error("Please fill all fields");
+  }
+
+  const allowedRides = ["BIKE", "CAR", "AUTO"];
+  if (!allowedRides.includes(rideType.toUpperCase())) {
+    res.status(400);
+    throw new Error("Ride type must be BIKE, CAR, or AUTO");
+  }
+
+  let user = await User.findOne({ $or: [{ username }, { email }] });
+
+  if (user) {
+    const isPasswordCorrect = await bcrypt.compare(password, user.password);
+    if (!isPasswordCorrect) {
+      res.status(401);
+      throw new Error("Account exists, but password incorrect");
+    }
+    // Upgrade existing user to Rider
+    user.isRider = true;
+    user.rideType = rideType.toUpperCase();
+    await user.save();
+  } else {
+    // Create new account directly as Rider
+    const hashPassword = await bcrypt.hash(password, 10);
+    user = await User.create({
+      name,
+      email,
+      username,
+      Mobile,
+      password: hashPassword,
+      isRider: true,
+      rideType: rideType.toUpperCase(),
+    });
+  }
+
+  res.status(201).json({
+    user_name: user.username,
+    Mobile: user.Mobile,
+    isRider: user.isRider,
+    jsonToken: getJsonToken(user.email, user._id),
+  });
+});
+
+// 3. LOGIN HANDLER (General/Customer)
+const LoginHandler = asyncHandler(async (req, res) => {
+  const { email, username, password } = req.body;
+
+  const currentUser = await User.findOne({
+    $or: [{ username: username }, { email: email }],
+  });
+
+  if (!currentUser || !(await bcrypt.compare(password, currentUser.password))) {
+    res.status(401);
+    throw new Error("Invalid credentials");
+  }
+
+  res.status(200).json({
+    user_name: currentUser.username,
+    Mobile: currentUser.Mobile,
+    jsonToken: getJsonToken(currentUser.email, currentUser._id),
+  });
+});
+
+// 4. LOGIN RIDER
+const loginRider = asyncHandler(async (req, res) => {
+  const { email, username, password } = req.body;
+
+  const currentUser = await User.findOne({
+    $or: [{ username: username }, { email: email }],
+  });
+
+  if (!currentUser || !(await bcrypt.compare(password, currentUser.password))) {
+    res.status(401);
+    throw new Error("Invalid credentials");
+  }
+
+  if (!currentUser.isRider) {
+    res.status(403);
+    throw new Error("Account found, but you are not registered as a rider.");
+  }
+
+  res.status(200).json({
+    user_name: currentUser.username,
+    Mobile: currentUser.Mobile,
+    isRider: currentUser.isRider,
+    rideType: currentUser.rideType,
+    jsonToken: getJsonToken(currentUser.email, currentUser._id),
+  });
+});
+
+const requestRide = asyncHandler(async (req, res) => {
+  const { lat, long, destlat, destlong, rideType } = req.body;
+
+  if (
+    lat === undefined ||
+    long === undefined ||
+    destlat === undefined ||
+    destlong === undefined ||
+    !rideType
+  ) {
+    res.status(400);
+    throw new Error("All fields are required");
+  }
+
+  const customerBlock = geohash.encode(lat, long, 6);
+
+  const url = `http://router.project-osrm.org/route/v1/driving/${long},${lat};${destlong},${destlat}?overview=false`;
+
+  const response = await axios.get(url);
+
+  if (!response.data || response.data.code !== "Ok") {
+    return res.status(400).json({ error: "Could not calculate route" });
+  }
+
+  const routeData = response.data.routes[0];
+  const distanceInMeters = routeData.distance;
+  const durationInSeconds = routeData.duration;
+
+  const distanceInKM = Number((distanceInMeters / 1000).toFixed(2));
+  const durationInMin = Math.ceil(durationInSeconds / 60);
+
+  const rates = { BIKE: 10, AUTO: 15, CAR: 25 };
+  const baseFare = 20;
+
+  const rideKey = rideType.toUpperCase();
+  if (!rates[rideKey]) {
+    res.status(400);
+    throw new Error("Invalid ride type");
+  }
+
+  const calculatedPrice = Math.round(
+    baseFare + distanceInKM * rates[rideKey]
+  );
+
+  const createRide = await Ride.create({
+    createdBy: req.user._id,
+    destination: [lat, long, destlat, destlong],
+    distance: distanceInKM,
+    duration: `${durationInMin} min`,
+    rideType: rideKey,
+    price: calculatedPrice,
+    block_location: customerBlock,
+  });
+
+  res.status(201).json({
+    rideId: createRide._id,
+    distance: distanceInKM,
+    duration: durationInMin,
+    price: calculatedPrice,
+    unit: "KM/Min",
+    status: "REQUESTED",
+  });
+});
+
+const cancelRide = asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const canceledRide = await Ride.findByIdAndUpdate(
+    id,
+    { status: "CANCELLED" },
+    { new: true }
+  );
+
+  if (!canceledRide) {
+    res.status(404);
+    throw new Error("Ride not found");
+  }
+
+  res.status(200).json({
+    rideId: canceledRide._id,
+    distance: canceledRide.distance,
+    duration: canceledRide.duration,
+    price: canceledRide.price,
+    unit: "KM/Min",
+    status: "CANCELLED",
+  });
+});
+
+const getAllRides = asyncHandler(async (req, res) => {
+  const rides = await Ride.find({
+    $or: [{ createdBy: req.user._id }, { captain: req.user._id }],
+  });
+
+  res.status(200).json(
+    rides.map((ride) => ({
+      rideId: ride._id,
+      distance: ride.distance,
+      duration: ride.duration,
+      price: ride.price,
+      unit: "KM/Min",
+      status: ride.status,
+    }))
+  );
+});
+
+const acceptRide = asyncHandler(async (req, res) => {
+  const { id } = req.body;
+  const acceptedRide = await Ride.findByIdAndUpdate(
+    id,
+    { status: "ACCEPTED", captain: req.user._id },
+    { new: true }
+  );
+
+  if (!acceptedRide) {
+    res.status(404);
+    throw new Error("Ride not found");
+  }
+
+  res.status(200).json({
+    rideId: acceptedRide._id,
+    distance: acceptedRide.distance,
+    duration: acceptedRide.duration,
+    price: acceptedRide.price,
+    unit: "KM/Min",
+    status: "ACCEPTED",
+  });
+});
+
+module.exports = {
+  LoginHandler,
+  createUser,
+  createRider,
+  loginRider,
+  requestRide,
+  cancelRide,
+  getAllRides,
+  acceptRide,
+};
