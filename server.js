@@ -66,16 +66,24 @@ io.on("connection", (socket) => {
     console.log(`Socket ${socket.id} left ride room: ${data}`);
   });
 
-  // Send location updates to the captain
+  // Send location updates to the captain (from customer)
   socket.on("sending_location_to_captain", (data) => {
-    socket.to(data.rideId).emit("receiving_location_to_captain", data);
-    console.log(`Location sent to captain in ride ${data.rideId}`);
+    socket.to(data.rideId).emit("receiving_location_to_captain", {
+      rideId: data.rideId,
+      lat: data.lat,
+      lng: data.lng,
+      timestamp: Date.now(),
+    });
   });
 
-  // Send location updates to the customer
+  // Send location updates to the customer (from captain)
   socket.on("sending_location_to_customer", (data) => {
-    socket.to(data.rideId).emit("receiving_location_to_customer", data);
-    console.log(`Location sent to customer in ride ${data.rideId}`);
+    socket.to(data.rideId).emit("receiving_location_to_customer", {
+      rideId: data.rideId,
+      lat: data.lat,
+      lng: data.lng,
+      timestamp: Date.now(),
+    });
   });
 
   // Notify the customer that the ride request has been accepted

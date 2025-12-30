@@ -375,6 +375,139 @@ const getNearbyRideRequests = asyncHandler(async (req, res) => {
   );
 });
 
+// Mark ride as picked up (ONGOING)
+const pickupRide = asyncHandler(async (req, res) => {
+  const { id } = req.body;
+  const ride = await Ride.findById(id);
+
+  if (!ride) {
+    res.status(404);
+    throw new Error("Ride not found");
+  }
+
+  // Verify captain owns this ride
+  if (ride.captain.toString() !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error("You are not authorized to update this ride");
+  }
+
+  if (ride.status !== "ACCEPTED") {
+    res.status(400);
+    throw new Error(`Ride cannot be picked up. Current status: ${ride.status}`);
+  }
+
+  const updatedRide = await Ride.findByIdAndUpdate(
+    id,
+    { status: "ONGOING" },
+    { new: true }
+  )
+    .populate("createdBy", "username Mobile")
+    .populate("captain", "username Mobile");
+
+  // Emit pickup notification
+  const io = getIO();
+  if (io) {
+    io.to(updatedRide._id.toString()).emit("ride_picked_up", {
+      rideId: updatedRide._id.toString(),
+      status: "ONGOING",
+    });
+    console.log(`Ride ${updatedRide._id} picked up - status: ONGOING`);
+  }
+
+  res.status(200).json({
+    rideId: updatedRide._id,
+    distance: updatedRide.distance,
+    duration: updatedRide.duration,
+    price: updatedRide.price,
+    status: updatedRide.status,
+  });
+});
+
+// Mark ride as completed
+const completeRide = asyncHandler(async (req, res) => {
+  const { id } = req.body;
+  const ride = await Ride.findById(id);
+
+  if (!ride) {
+    res.status(404);
+    throw new Error("Ride not found");
+  }
+
+  // Verify captain owns this ride
+  if (ride.captain.toString() !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error("You are not authorized to update this ride");
+  }
+
+  if (ride.status !== "ONGOING") {
+    res.status(400);
+    throw new Error(`Ride cannot be completed. Current status: ${ride.status}`);
+  }
+
+  const updatedRide = await Ride.findByIdAndUpdate(
+    id,
+    { status: "COMPLETED" },
+    { new: true }
+  )
+    .populate("createdBy", "username Mobile")
+    .populate("captain", "username Mobile");
+
+  // Emit completion notification
+  const io = getIO();
+  if (io) {
+    io.to(updatedRide._id.toString()).emit("ride_completed", {
+      rideId: updatedRide._id.toString(),
+      status: "COMPLETED",
+    });
+    console.log(`Ride ${updatedRide._id} completed`);
+  }
+
+  res.status(200).json({
+    rideId: updatedRide._id,
+    distance: updatedRide.distance,
+    duration: updatedRide.duration,
+    price: updatedRide.price,
+    status: updatedRide.status,
+  });
+});
+
+// Get active ride for captain or customer
+const getActiveRide = asyncHandler(async (req, res) => {
+  const activeRide = await Ride.findOne({
+    $or: [{ createdBy: req.user._id }, { captain: req.user._id }],
+    status: { $in: ["ACCEPTED", "ONGOING"] },
+  })
+    .populate("createdBy", "username Mobile")
+    .populate("captain", "username Mobile rideType")
+    .sort({ createdAt: -1 });
+
+  if (!activeRide) {
+    return res.status(200).json(null);
+  }
+
+  res.status(200).json({
+    rideId: activeRide._id,
+    distance: activeRide.distance,
+    duration: activeRide.duration,
+    price: activeRide.price,
+    rideType: activeRide.rideType,
+    status: activeRide.status,
+    destination: activeRide.destination, // [pickupLat, pickupLng, dropoffLat, dropoffLng]
+    customer: {
+      username: activeRide.createdBy?.username || "Unknown",
+      mobile: activeRide.createdBy?.Mobile || "N/A",
+    },
+    captain: activeRide.captain
+      ? {
+          username: activeRide.captain.username || "Unknown",
+          mobile: activeRide.captain.Mobile || "N/A",
+          rideType: activeRide.captain.rideType || "N/A",
+        }
+      : null,
+    createdAt: activeRide.createdAt,
+  });
+});
+
 module.exports = {
   LoginHandler,
   createUser,
@@ -385,4 +518,7 @@ module.exports = {
   getAllRides,
   acceptRide,
   getNearbyRideRequests,
+  pickupRide,
+  completeRide,
+  getActiveRide,
 };
