@@ -8,7 +8,7 @@ const validatejson=asyncHandler((req,res,next)=>{
  if (authHeader && authHeader.startsWith("Bearer")) {
     const token=authHeader.split(" ")[1];
     
-    jwt.verify(token,process.env.JWT_SECRET_KEY,(err,decoded)=>{
+    jwt.verify(token,process.env.BACKEND_JWT_SECRET_KEY,(err,decoded)=>{
        
         
         if (err) {

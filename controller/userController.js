@@ -273,6 +273,51 @@ const acceptRide = asyncHandler(async (req, res) => {
   });
 });
 
+const getNearbyRideRequests = asyncHandler(async (req, res) => {
+  const { lat, long, rideType } = req.query;
+
+  if (!lat || !long) {
+    res.status(400);
+    throw new Error("Latitude and longitude are required");
+  }
+
+  // Get current location geohash
+  const currentBlock = geohash.encode(parseFloat(lat), parseFloat(long), 6);
+
+  // Find rides in the same block or nearby blocks
+  // Status should be REQUESTED and rideType should match (if provided)
+  const query = {
+    status: "REQUESTED",
+    block_location: currentBlock,
+  };
+
+  if (rideType) {
+    query.rideType = rideType.toUpperCase();
+  }
+
+  const nearbyRides = await Ride.find(query)
+    .populate("createdBy", "username Mobile")
+    .sort({ createdAt: -1 })
+    .limit(20);
+
+  res.status(200).json(
+    nearbyRides.map((ride) => ({
+      rideId: ride._id,
+      distance: ride.distance,
+      duration: ride.duration,
+      price: ride.price,
+      rideType: ride.rideType,
+      status: ride.status,
+      destination: ride.destination,
+      customer: {
+        username: ride.createdBy?.username || "Unknown",
+        mobile: ride.createdBy?.Mobile || "N/A",
+      },
+      createdAt: ride.createdAt,
+    }))
+  );
+});
+
 module.exports = {
   LoginHandler,
   createUser,
@@ -282,4 +327,5 @@ module.exports = {
   cancelRide,
   getAllRides,
   acceptRide,
+  getNearbyRideRequests,
 };
