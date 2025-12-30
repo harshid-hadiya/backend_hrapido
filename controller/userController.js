@@ -1,10 +1,14 @@
-const axios = require('axios');
-const geohash = require('ngeohash');
+const axios = require("axios");
+const geohash = require("ngeohash");
 const User = require("../model/userModel.js");
 const Ride = require("../model/rideModel.js");
 const bcrypt = require("bcrypt");
 const asyncHandler = require("express-async-handler");
 const getJsonToken = require("../config/getJsonToken.js");
+
+// Get io instance from socket config
+const socketConfig = require("../config/socket.js");
+const getIO = () => socketConfig.getIO();
 // 1. CREATE USER (Customer)
 const createUser = asyncHandler(async (req, res) => {
   const { name, email, username, password, Mobile } = req.body;
@@ -186,9 +190,7 @@ const requestRide = asyncHandler(async (req, res) => {
     throw new Error("Invalid ride type");
   }
 
-  const calculatedPrice = Math.round(
-    baseFare + distanceInKM * rates[rideKey]
-  );
+  const calculatedPrice = Math.round(baseFare + distanceInKM * rates[rideKey]);
 
   const createRide = await Ride.create({
     createdBy: req.user._id,
@@ -199,6 +201,37 @@ const requestRide = asyncHandler(async (req, res) => {
     price: calculatedPrice,
     block_location: customerBlock,
   });
+
+  // Populate customer info for socket emission
+  const rideWithCustomer = await Ride.findById(createRide._id).populate(
+    "createdBy",
+    "username Mobile"
+  );
+
+  // Emit ride request to all captains in the same geohash block
+  const io = getIO();
+  if (io) {
+    const rideData = {
+      rideId: createRide._id.toString(),
+      distance: distanceInKM,
+      duration: `${durationInMin} min`,
+      price: calculatedPrice,
+      rideType: rideKey,
+      status: "REQUESTED",
+      destination: [lat, long, destlat, destlong],
+      customer: {
+        username: rideWithCustomer.createdBy?.username || "Unknown",
+        mobile: rideWithCustomer.createdBy?.Mobile || "N/A",
+      },
+      createdAt: createRide.createdAt,
+    };
+
+    // Emit to the geohash block room
+    io.to(customerBlock).emit("new_ride_request", rideData);
+    console.log(
+      `Ride request ${createRide._id} emitted to block: ${customerBlock}`
+    );
+  }
 
   res.status(201).json({
     rideId: createRide._id,
@@ -221,6 +254,18 @@ const cancelRide = asyncHandler(async (req, res) => {
   if (!canceledRide) {
     res.status(404);
     throw new Error("Ride not found");
+  }
+
+  // Emit cancellation to the block room
+  const io = getIO();
+  if (io && canceledRide.block_location) {
+    io.to(canceledRide.block_location).emit("ride_cancelled", {
+      rideId: canceledRide._id.toString(),
+      status: "CANCELLED",
+    });
+    console.log(
+      `Ride cancellation ${canceledRide._id} emitted to block: ${canceledRide.block_location}`
+    );
   }
 
   res.status(200).json({
@@ -261,6 +306,18 @@ const acceptRide = asyncHandler(async (req, res) => {
   if (!acceptedRide) {
     res.status(404);
     throw new Error("Ride not found");
+  }
+
+  // Emit ride accepted to the block room (so other captains know it's taken)
+  const io = getIO();
+  if (io && acceptedRide.block_location) {
+    io.to(acceptedRide.block_location).emit("ride_accepted", {
+      rideId: acceptedRide._id.toString(),
+      status: "ACCEPTED",
+    });
+    console.log(
+      `Ride accepted ${acceptedRide._id} emitted to block: ${acceptedRide.block_location}`
+    );
   }
 
   res.status(200).json({
